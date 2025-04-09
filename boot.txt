@@ -1,0 +1,11 @@
+#!/bin/sh -e
+# rc.local
+
+echo "부팅 완료됨" > /home/debian/boot.log
+python3 /home/debian/start_camera.py &
+
+
+radxa@undefined:~$ sudo systemctl enable --now ssh
+
+
+exit 0
