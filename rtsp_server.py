@@ -15,12 +15,10 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
-# 시스템 타임존 (KST) 기준 시간 반환
-def get_kst_from_running_time(running_time_ns):
+# KST 기준으로 저장 시점 - 1분 타임스탬프 파일명 생성
+def get_previous_minute_filename():
     kst = timezone(timedelta(hours=9))
-    now = datetime.now(tz=kst)
-    elapsed = timedelta(seconds=running_time_ns / 1e9)
-    started = now - elapsed
+    started = datetime.now(tz=kst) - timedelta(minutes=1)
     return started.strftime("record_%Y%m%d_%H%M%S.mp4")
 
 # RTSP 스트리밍 MediaFactory
@@ -83,7 +81,7 @@ class RtspRecordingService:
             "tee name=t "
             "t. ! queue ! "
             f"{self.encoder} {self.encoder_options} ! "
-            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "  # 15분
+            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "
             "t. ! queue ! intervideosink channel=cam"
         ).format(file_pattern)
 
@@ -96,10 +94,8 @@ class RtspRecordingService:
 
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
-            running_time_ns = structure.get_value("running-time")
-
             if location and os.path.exists(location):
-                new_name = get_kst_from_running_time(running_time_ns)
+                new_name = get_previous_minute_filename()
                 full_new_path = os.path.join(self.record_path, new_name)
                 try:
                     os.rename(location, full_new_path)
