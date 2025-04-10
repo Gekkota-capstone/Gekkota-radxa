@@ -6,14 +6,23 @@ import signal
 import socket
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 
 # 로그 비활성화
 logging.disable(logging.CRITICAL)
 
+# GStreamer 초기화
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
+# 타임스탬프 기반 파일명 생성 (KST 기준)
+def generate_kst_filename():
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+    return now.strftime("record_%Y%m%d_%H%M%S.mp4")
+
+# RTSP 스트리밍 MediaFactory
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
                  payload="rtph265pay", pt=97):
@@ -32,10 +41,11 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
 
+# RTSP + 영상 저장 서비스
 class RtspRecordingService:
     def __init__(self, device='/dev/video0', port=8554, mount='/test',
                  encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
-                 payload="rtph265pay", pt=97, record_path="/home/radxa/Videos"):
+                 payload='rtph265pay', pt=97, record_path="/home/radxa/Videos"):
 
         self.device = device
         self.port = str(port)
@@ -48,7 +58,7 @@ class RtspRecordingService:
 
         Gst.init(None)
 
-        # RTSP 서버
+        # RTSP 서버 설정
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
         self.factory = TeeRtspMediaFactory(
@@ -57,15 +67,21 @@ class RtspRecordingService:
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
 
-        # 녹화용 파이프라인
+        # 영상 저장용 파이프라인 생성
         self.record_pipeline = self._create_record_pipeline()
 
+        # GLib 루프
         self.loop = GLib.MainLoop()
+
+        # 버스 감시: 파일 저장 이벤트 처리
+        self.record_pipeline.get_bus().add_signal_watch()
+        self.record_pipeline.get_bus().connect("message::element", self._on_element_message)
 
     def _create_record_pipeline(self):
         os.makedirs(self.record_path, exist_ok=True)
 
-        file_pattern = os.path.join(self.record_path, "record_%05d.mp4")
+        # 초기 더미 이름 (이후 저장 직후 rename 됨)
+        file_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
 
         pipeline_str = (
             f"v4l2src device={self.device} ! "
@@ -78,10 +94,24 @@ class RtspRecordingService:
 
         return Gst.parse_launch(pipeline_str)
 
+    def _on_element_message(self, bus, message):
+        structure = message.get_structure()
+        if not structure:
+            return
+
+        if structure.get_name() == "splitmuxsink-fragment-closed":
+            location = structure.get_string("location")
+            if location and os.path.exists(location):
+                new_name = os.path.join(self.record_path, generate_kst_filename())
+                try:
+                    os.rename(location, new_name)
+                    print(f"📁 저장 완료: {new_name}")
+                except Exception as e:
+                    print(f"❌ 파일 이름 변경 실패: {e}")
+
     def start(self):
         if self.server.attach(None) == 0:
             sys.exit(1)
-
         self.record_pipeline.set_state(Gst.State.PLAYING)
 
     def run(self):
