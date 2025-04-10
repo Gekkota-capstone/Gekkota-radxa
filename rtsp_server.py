@@ -59,20 +59,15 @@ class RtspRecordingService:
 
         Gst.init(None)
 
-        # RTSP 서버 설정
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
         self.factory = TeeRtspMediaFactory(encoder, encoder_options, payload, pt)
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
 
-        # 영상 저장용 파이프라인 생성
         self.record_pipeline = self._create_record_pipeline()
-
-        # GLib 루프
         self.loop = GLib.MainLoop()
 
-        # 버스 감시: 파일 저장 이벤트 처리
         self.record_pipeline.get_bus().add_signal_watch()
         self.record_pipeline.get_bus().connect("message::element", self._on_element_message)
 
@@ -82,10 +77,13 @@ class RtspRecordingService:
 
         pipeline_str = (
             f"v4l2src device={self.device} ! "
-            "videoconvert ! video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1 ! "
-            "tee name=t t. ! queue ! "
+            "videorate ! "
+            "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! "
+            "videoconvert ! "
+            "tee name=t "
+            "t. ! queue ! "
             f"{self.encoder} {self.encoder_options} ! "
-            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "
+            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "  # 15분
             "t. ! queue ! intervideosink channel=cam"
         ).format(file_pattern)
 
@@ -162,4 +160,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
