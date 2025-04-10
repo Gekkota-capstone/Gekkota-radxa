@@ -7,11 +7,10 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
 
-# 환경설정 로드
+# 환경 설정
 load_dotenv()
 
 RECORD_PATH = "/home/radxa/Videos"
-OUTPUT_PATH = "/home/radxa/keyframes"
 S3_BUCKET = "direp"
 S3_VIDEO_FOLDER = "stream/"
 S3_IMAGE_FOLDER = "opencv/"
@@ -25,22 +24,28 @@ s3 = boto3.client(
     region_name=AWS_REGION
 )
 
-os.makedirs(OUTPUT_PATH, exist_ok=True)
+def upload_image_to_s3(image_path):
+    try:
+        image_name = os.path.basename(image_path)
+        s3.upload_file(image_path, S3_BUCKET, os.path.join(S3_IMAGE_FOLDER, image_name))
+        print(f"🖼️ 업로드됨: s3://{S3_BUCKET}/{S3_IMAGE_FOLDER}{image_name}")
+        os.remove(image_path)
+    except Exception as e:
+        print(f"❌ 이미지 업로드 실패: {image_path} - {e}")
 
-def extract_keyframes(video_path, creation_time_str):
+def extract_and_upload_keyframes(video_path, creation_time_str):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"❌ 영상 열기 실패: {video_path}")
-        return []
+        return
 
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     base_time = datetime.strptime(creation_time_str, "%Y%m%d_%H%M%S")
-    keyframes = []
 
     ret, prev_frame = cap.read()
     if not ret:
         cap.release()
-        return []
+        return
 
     frame_id = 0
     while True:
@@ -59,17 +64,15 @@ def extract_keyframes(video_path, creation_time_str):
                 seconds = frame_id // fps
                 timestamp = base_time + timedelta(seconds=seconds)
                 filename = f"record_{timestamp.strftime('%Y-%m-%d-%H-%M-%S')}.jpg"
-                filepath = os.path.join(OUTPUT_PATH, filename)
-                cv2.imwrite(filepath, frame)
-                keyframes.append(filepath)
-                print(f"🖼️ 저장됨: {filename}")
+                image_path = os.path.join("/tmp", filename)
+                cv2.imwrite(image_path, frame)
+                upload_image_to_s3(image_path)
 
             prev_frame = frame
 
         frame_id += 1
 
     cap.release()
-    return keyframes
 
 class VideoHandler(FileSystemEventHandler):
     def on_moved(self, event):
@@ -77,31 +80,24 @@ class VideoHandler(FileSystemEventHandler):
             return
 
         video_file = os.path.basename(event.dest_path)
-        print(f"📦 업로드 대상 : {video_file}")
+        print(f"📦 업로드 대상: {video_file}")
 
         try:
             base = os.path.splitext(video_file)[0]
             time_str = base.replace("record_", "")
-            keyframes = extract_keyframes(event.dest_path, time_str)
-
-            for image_path in keyframes:
-                image_name = os.path.basename(image_path)
-                s3.upload_file(image_path, S3_BUCKET, os.path.join(S3_IMAGE_FOLDER, image_name))
-                os.remove(image_path)
+            extract_and_upload_keyframes(event.dest_path, time_str)
 
             s3.upload_file(event.dest_path, S3_BUCKET, os.path.join(S3_VIDEO_FOLDER, video_file))
             print(f"✅ 업로드 완료: s3://{S3_BUCKET}/{S3_VIDEO_FOLDER}{video_file}")
             os.remove(event.dest_path)
             print(f"🗑️ 삭제 완료: {video_file}")
-
         except Exception as e:
             print(f"❌ 처리 실패: {video_file} - {e}")
 
 if __name__ == "__main__":
     print("📡 영상 감시 및 업로드 시작...")
-    event_handler = VideoHandler()
     observer = Observer()
-    observer.schedule(event_handler, path=RECORD_PATH, recursive=False)
+    observer.schedule(VideoHandler(), path=RECORD_PATH, recursive=False)
     observer.start()
 
     try:

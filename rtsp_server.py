@@ -3,7 +3,6 @@ import gi
 import sys
 import argparse
 import signal
-import socket
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -16,17 +15,19 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
-# 타임스탬프 기반 파일명 생성 (KST 기준)
-def generate_kst_filename():
+# 시스템 타임존 (KST) 기준 시간 반환
+def get_kst_from_running_time(running_time_ns):
     kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    return now.strftime("record_%Y%m%d_%H%M%S.mp4")
+    now = datetime.now(tz=kst)
+    elapsed = timedelta(seconds=running_time_ns / 1e9)
+    started = now - elapsed
+    return started.strftime("record_%Y%m%d_%H%M%S.mp4")
 
 # RTSP 스트리밍 MediaFactory
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
                  payload="rtph265pay", pt=97):
-        super(TeeRtspMediaFactory, self).__init__()
+        super().__init__()
         self.encoder = encoder
         self.encoder_options = encoder_options
         self.payload = payload
@@ -61,9 +62,7 @@ class RtspRecordingService:
         # RTSP 서버 설정
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
-        self.factory = TeeRtspMediaFactory(
-            encoder, encoder_options, payload, pt
-        )
+        self.factory = TeeRtspMediaFactory(encoder, encoder_options, payload, pt)
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
 
@@ -79,8 +78,6 @@ class RtspRecordingService:
 
     def _create_record_pipeline(self):
         os.makedirs(self.record_path, exist_ok=True)
-
-        # 초기 더미 이름 (이후 저장 직후 rename 됨)
         file_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
 
         pipeline_str = (
@@ -88,7 +85,7 @@ class RtspRecordingService:
             "videoconvert ! video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1 ! "
             "tee name=t t. ! queue ! "
             f"{self.encoder} {self.encoder_options} ! "
-            "h265parse ! splitmuxsink muxer=mp4mux location={} max-size-time=60000000000 "
+            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "
             "t. ! queue ! intervideosink channel=cam"
         ).format(file_pattern)
 
@@ -101,11 +98,14 @@ class RtspRecordingService:
 
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
+            running_time_ns = structure.get_value("running-time")
+
             if location and os.path.exists(location):
-                new_name = os.path.join(self.record_path, generate_kst_filename())
+                new_name = get_kst_from_running_time(running_time_ns)
+                full_new_path = os.path.join(self.record_path, new_name)
                 try:
-                    os.rename(location, new_name)
-                    print(f"📁 저장 완료: {new_name}")
+                    os.rename(location, full_new_path)
+                    print(f"📁 저장 완료: {full_new_path}")
                 except Exception as e:
                     print(f"❌ 파일 이름 변경 실패: {e}")
 
@@ -162,3 +162,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
