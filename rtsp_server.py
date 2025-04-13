@@ -7,10 +7,10 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-try:
-    os.sched_setaffinity(0, {0, 1, 2})
-except AttributeError:
-    pass
+#try:
+#    os.sched_setaffinity(0, {0, 1, 2})
+#except AttributeError:
+#    pass
 
 logging.disable(logging.CRITICAL)
 

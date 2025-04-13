@@ -10,10 +10,10 @@ from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
-try:
-    os.sched_setaffinity(0, {2, 3})
-except AttributeError:
-    pass
+#try:
+#    os.sched_setaffinity(0, {2, 3})
+#except AttributeError:
+#    pass
 
 load_dotenv()
 RECORD_PATH = "/home/radxa/Videos"
@@ -84,8 +84,7 @@ def extract_and_upload_zip_from_video(video_path, creation_time_str):
             break
 
         if frame_id % fps == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            resized = cv2.resize(gray, (1280, 720))
+            resized = cv2.resize(frame, (1280, 720))  # ✅ 컬러 상태 유지
             seconds = frame_id // fps
             timestamp = base_time + timedelta(seconds=seconds)
             filename = f"{sn}_{timestamp.strftime('%Y-%m-%d-%H-%M-%S')}.jpg"
