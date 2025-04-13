@@ -7,21 +7,22 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-# 로그 비활성화
+try:
+    os.sched_setaffinity(0, {0, 1, 2})
+except AttributeError:
+    pass
+
 logging.disable(logging.CRITICAL)
 
-# GStreamer 초기화
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
-# KST 기준으로 저장 시점 - 1분 타임스탬프 파일명 생성
 def get_previous_minute_filename():
     kst = timezone(timedelta(hours=9))
     started = datetime.now(tz=kst) - timedelta(minutes=1)
     return started.strftime("record_%Y%m%d_%H%M%S.mp4")
 
-# RTSP 스트리밍 MediaFactory
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
                  payload="rtph265pay", pt=97):
@@ -33,14 +34,13 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
 
         self.launch_string = (
             "intervideosrc channel=cam ! "
-            "queue ! {0} {1} ! "
+            "queue leaky=downstream max-size-buffers=5 ! {0} {1} ! "
             "{2} name=pay0 pt={3}"
         ).format(self.encoder, self.encoder_options, self.payload, self.pt)
 
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
 
-# RTSP + 영상 저장 서비스
 class RtspRecordingService:
     def __init__(self, device='/dev/video0', port=8554, mount='/test',
                  encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
@@ -59,6 +59,7 @@ class RtspRecordingService:
 
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
+        self.server.props.backlog = 2
         self.factory = TeeRtspMediaFactory(encoder, encoder_options, payload, pt)
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
@@ -77,12 +78,11 @@ class RtspRecordingService:
             f"v4l2src device={self.device} ! "
             "videorate ! "
             "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! "
-            "videoconvert ! "
             "tee name=t "
-            "t. ! queue ! "
+            "t. ! queue leaky=downstream max-size-buffers=5 ! "
             f"{self.encoder} {self.encoder_options} ! "
-            "h265parse ! splitmuxsink name=smux muxer=mp4mux location={} max-size-time=60000000000 "
-            "t. ! queue ! intervideosink channel=cam"
+            "h265parse ! splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "
+            "t. ! queue leaky=downstream max-size-buffers=5 ! intervideosink channel=cam"
         ).format(file_pattern)
 
         return Gst.parse_launch(pipeline_str)
@@ -99,9 +99,8 @@ class RtspRecordingService:
                 full_new_path = os.path.join(self.record_path, new_name)
                 try:
                     os.rename(location, full_new_path)
-                    print(f"📁 저장 완료: {full_new_path}")
-                except Exception as e:
-                    print(f"❌ 파일 이름 변경 실패: {e}")
+                except Exception:
+                    pass
 
     def start(self):
         if self.server.attach(None) == 0:
