@@ -85,7 +85,8 @@ def upload_video_to_s3(video_path):
 
     try:
         with open(video_path, "rb") as f:
-            res = requests.put(presigned_url, data=f)
+            headers = {"Content-Type": "video/mp4"}  # 🛠 필수 설정
+            res = requests.put(presigned_url, data=f, headers=headers)
             res.raise_for_status()
             print(f"✅ 업로드 완료: {video_file}")
         os.remove(video_path)
