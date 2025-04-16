@@ -5,19 +5,16 @@ import argparse
 import signal
 import logging
 import os
+import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
-#try:
-#    os.sched_setaffinity(0, {0, 1, 2})
-#except AttributeError:
-#    pass
-
-logging.disable(logging.CRITICAL)
 
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
+
+# 로그 끄기
+logging.disable(logging.CRITICAL)
 
 # ✅ SN 불러오기
 def load_sn():
@@ -31,13 +28,33 @@ def load_sn():
 
 DEVICE_SN = load_sn()
 
-# ✅ 저장될 파일명 생성 함수
-def get_previous_minute_filename():
+# ✅ 타임스탬프 생성
+def get_previous_minute_timestamp():
     kst = timezone(timedelta(hours=9))
     started = datetime.now(tz=kst) - timedelta(minutes=1)
-    timestamp = started.strftime("%Y%m%d_%H%M%S")
-    return f"{DEVICE_SN}_{timestamp}.mp4"
+    return started.strftime("%Y%m%d_%H%M%S")
 
+# ✅ 프레임 리네이밍 함수
+def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Frames"):
+    base_time = datetime.strptime(video_timestamp, "%Y%m%d_%H%M%S")
+
+    # multifilesink에서 쌓인 최신 이미지 60개만 처리
+    frame_files = sorted(
+        [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
+        key=lambda x: os.path.getmtime(os.path.join(frame_dir, x))
+    )[-60:]  # 마지막 60개만
+
+    for i, filename in enumerate(frame_files):
+        old_path = os.path.join(frame_dir, filename)
+        timestamp = base_time + timedelta(seconds=i)
+        new_name = f"{sn}_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
+        new_path = os.path.join(frame_dir, new_name)
+        try:
+            shutil.move(old_path, new_path)
+        except Exception as e:
+            print(f"❌ Rename 실패: {old_path} → {new_path} - {e}")
+
+# ✅ RTSP Factory
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
                  payload="rtph265pay", pt=97):
@@ -48,18 +65,18 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
         self.pt = pt
 
         self.launch_string = (
-            "intervideosrc channel=cam ! "
-            "queue leaky=downstream max-size-buffers=5 ! {0} {1} ! "
-            "{2} name=pay0 pt={3}"
+            "intervideosrc channel=cam ! queue leaky=downstream max-size-buffers=5 ! "
+            "{0} {1} ! {2} name=pay0 pt={3}"
         ).format(self.encoder, self.encoder_options, self.payload, self.pt)
 
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
 
+# ✅ RTSP 서비스
 class RtspRecordingService:
     def __init__(self, device='/dev/video0', port=8554, mount='/test',
                  encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
-                 payload='rtph265pay', pt=97, record_path="/home/radxa/Videos"):
+                 payload='rtph265pay', pt=97, record_path="/home/radxa/Videos", frame_path="/home/radxa/Frames"):
 
         self.device = device
         self.port = str(port)
@@ -69,12 +86,14 @@ class RtspRecordingService:
         self.payload = payload
         self.pt = pt
         self.record_path = record_path
+        self.frame_path = frame_path
 
         Gst.init(None)
 
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
         self.server.props.backlog = 2
+
         self.factory = TeeRtspMediaFactory(encoder, encoder_options, payload, pt)
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
@@ -87,18 +106,27 @@ class RtspRecordingService:
 
     def _create_record_pipeline(self):
         os.makedirs(self.record_path, exist_ok=True)
-        file_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
+        os.makedirs(self.frame_path, exist_ok=True)
+
+        video_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
+        frame_pattern = os.path.join(self.frame_path, "frame_%05d.jpg")
 
         pipeline_str = (
             f"v4l2src device={self.device} ! "
-            "videorate ! "
-            "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! "
-            "tee name=t "
+            "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! tee name=t "
+
+            # 영상 저장
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
-            f"{self.encoder} {self.encoder_options} ! "
-            "h265parse ! splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "
+            f"{self.encoder} {self.encoder_options} ! h265parse ! "
+            "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "
+
+            # 이미지 저장
+            "t. ! queue leaky=downstream max-size-buffers=5 ! "
+            "videorate ! video/x-raw,framerate=1/1 ! jpegenc ! multifilesink location={} post-messages=true "
+
+            # RTSP 송출
             "t. ! queue leaky=downstream max-size-buffers=5 ! intervideosink channel=cam"
-        ).format(file_pattern)
+        ).format(video_pattern, frame_pattern)
 
         return Gst.parse_launch(pipeline_str)
 
@@ -110,12 +138,13 @@ class RtspRecordingService:
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
             if location and os.path.exists(location):
-                new_name = get_previous_minute_filename()
-                full_new_path = os.path.join(self.record_path, new_name)
+                timestamp = get_previous_minute_timestamp()
+                new_video_path = os.path.join(self.record_path, f"{DEVICE_SN}_{timestamp}.mp4")
                 try:
-                    os.rename(location, full_new_path)
-                except Exception:
-                    pass
+                    os.rename(location, new_video_path)
+                    rename_multifilesink_frames(DEVICE_SN, timestamp, self.frame_path)
+                except Exception as e:
+                    print(f"❌ 파일 변경 실패: {e}")
 
     def start(self):
         if self.server.attach(None) == 0:
@@ -141,7 +170,7 @@ def signal_handler(sig, frame, service):
     sys.exit(0)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="24/7 Recording RTSP Server for Radxa")
+    parser = argparse.ArgumentParser(description="RTSP Server + Recording + Frame Extractor")
     parser.add_argument('--device', default='/dev/video0')
     parser.add_argument('--port', type=int, default=8554)
     parser.add_argument('--mount', default='/test')
@@ -150,6 +179,7 @@ def parse_args():
     parser.add_argument('--payload', default='rtph265pay')
     parser.add_argument('--pt', type=int, default=97)
     parser.add_argument('--record-path', default='/home/radxa/Videos')
+    parser.add_argument('--frame-path', default='/home/radxa/Frames')
     return parser.parse_args()
 
 def main():
@@ -162,7 +192,8 @@ def main():
         encoder_options=args.encoder_options,
         payload=args.payload,
         pt=args.pt,
-        record_path=args.record_path
+        record_path=args.record_path,
+        frame_path=args.frame_path
     )
     signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, service))
     signal.signal(signal.SIGTERM, lambda s, f: signal_handler(s, f, service))
