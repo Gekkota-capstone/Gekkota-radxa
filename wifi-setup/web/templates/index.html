@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Wi-Fi 설정</title>
+</head>
+<body>
+  <h1>📶 Wi-Fi 설정</h1>
+  <form method="post">
+    <label>SSID: <input type="text" name="ssid" required></label><br>
+    <label>Password: <input type="password" name="password" required></label><br>
+    <button type="submit">연결 시도</button>
+  </form>
+  {% if message %}
+    <p>{{ message }}</p>
+  {% endif %}
+</body>
+</html>
