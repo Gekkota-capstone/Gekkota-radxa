@@ -8,10 +8,10 @@ import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-try:
-    os.sched_setaffinity(0, {0, 1, 2})
-except AttributeError:
-    pass
+#try:
+#    os.sched_setaffinity(0, {0, 1, 2})
+#except AttributeError:
+#    pass
 
 logging.disable(logging.CRITICAL)
 
