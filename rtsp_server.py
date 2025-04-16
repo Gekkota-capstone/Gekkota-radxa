@@ -6,6 +6,7 @@ import signal
 import logging
 import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 try:
     os.sched_setaffinity(0, {0, 1, 2})
@@ -18,10 +19,24 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
+# ✅ SN 불러오기
+def load_sn():
+    try:
+        sn_path = Path("/home/radxa/sn.txt")
+        if sn_path.exists():
+            return sn_path.read_text().strip()
+    except:
+        pass
+    return "UNKNOWN"
+
+DEVICE_SN = load_sn()
+
+# ✅ 저장될 파일명 생성 함수
 def get_previous_minute_filename():
     kst = timezone(timedelta(hours=9))
     started = datetime.now(tz=kst) - timedelta(minutes=1)
-    return started.strftime("record_%Y%m%d_%H%M%S.mp4")
+    timestamp = started.strftime("%Y%m%d_%H%M%S")
+    return f"{DEVICE_SN}_{timestamp}.mp4"
 
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
