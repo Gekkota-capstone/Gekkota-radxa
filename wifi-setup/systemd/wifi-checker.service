@@ -1,0 +1,10 @@
+[Unit]
+Description=Wi-Fi 상태 확인 및 AP 모드 진입
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/radxa/wifi-setup/wifi_checker.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
