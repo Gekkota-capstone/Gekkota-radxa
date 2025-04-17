@@ -8,7 +8,7 @@ region_name = "ap-northeast-2"  # 예: 서울 리전
 
 # 2. 설정
 bucket_name = "direp"
-prefix = "images/cats/"  # S3 상의 폴더 경로
+prefix = "opencv/SFRXC12515GF00001/20250417/"  # S3 상의 폴더 경로
 local_dir = "./downloaded_images"
 
 # 3. S3 클라이언트 생성
