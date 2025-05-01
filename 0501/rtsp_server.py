@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+# rstp_server.py
+
 import gi
 import sys
 import argparse
@@ -10,11 +11,12 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-gi.require_version('Gst', '1.0')
-gi.require_version('GstRtspServer', '1.0')
+gi.require_version("Gst", "1.0")
+gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GLib, GstRtspServer
 
 logging.disable(logging.CRITICAL)
+
 
 def load_sn():
     try:
@@ -25,7 +27,9 @@ def load_sn():
         pass
     return "UNKNOWN"
 
+
 DEVICE_SN = load_sn()
+
 
 def get_previous_minute_timestamp():
     kst = timezone(timedelta(hours=9))
@@ -33,17 +37,26 @@ def get_previous_minute_timestamp():
     started = started.replace(second=0, microsecond=0)
     return started.strftime("%Y%m%d_%H%M%S")
 
+
 def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Frames"):
     base_time = datetime.strptime(video_timestamp, "%Y%m%d_%H%M%S")
     try:
         frame_files = sorted(
-            [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
-            key=lambda x: int(x.split('_')[1].split('.')[0])
+            [
+                f
+                for f in os.listdir(frame_dir)
+                if f.startswith("frame_") and f.endswith(".jpg")
+            ],
+            key=lambda x: int(x.split("_")[1].split(".")[0]),
         )[-60:]
     except:
         frame_files = sorted(
-            [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
-            key=lambda x: os.path.getmtime(os.path.join(frame_dir, x))
+            [
+                f
+                for f in os.listdir(frame_dir)
+                if f.startswith("frame_") and f.endswith(".jpg")
+            ],
+            key=lambda x: os.path.getmtime(os.path.join(frame_dir, x)),
         )[-60:]
 
     for i, filename in enumerate(frame_files):
@@ -58,15 +71,22 @@ def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Fram
         except:
             pass
 
+
 def wait_until_next_minute():
     now = datetime.utcnow()
     next_min = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
     wait_sec = (next_min - now).total_seconds()
     time.sleep(wait_sec)
 
+
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
-    def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
-                 payload="rtph265pay", pt=97):
+    def __init__(
+        self,
+        encoder="mpph265enc",
+        encoder_options="bps=51200000 rc-mode=vbr",
+        payload="rtph265pay",
+        pt=97,
+    ):
         super().__init__()
         self.encoder = encoder
         self.encoder_options = encoder_options
@@ -80,10 +100,20 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
 
+
 class RtspRecordingService:
-    def __init__(self, device='/dev/video0', port=8554, mount='/test',
-                 encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
-                 payload='rtph265pay', pt=97, record_path="/home/radxa/Videos", frame_path="/home/radxa/Frames"):
+    def __init__(
+        self,
+        device="/dev/video0",
+        port=8554,
+        mount="/test",
+        encoder="mpph265enc",
+        encoder_options="bps=51200000 rc-mode=vbr",
+        payload="rtph265pay",
+        pt=97,
+        record_path="/home/radxa/Videos",
+        frame_path="/home/radxa/Frames",
+    ):
 
         self.device = device
         self.port = str(port)
@@ -112,7 +142,9 @@ class RtspRecordingService:
 
         self.loop = GLib.MainLoop()
         self.record_pipeline.get_bus().add_signal_watch()
-        self.record_pipeline.get_bus().connect("message::element", self._on_element_message)
+        self.record_pipeline.get_bus().connect(
+            "message::element", self._on_element_message
+        )
 
     def _create_record_pipeline(self):
         video_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
@@ -137,7 +169,9 @@ class RtspRecordingService:
             location = structure.get_string("location")
             if location and os.path.exists(location):
                 timestamp = get_previous_minute_timestamp()
-                new_video_path = os.path.join(self.record_path, f"{DEVICE_SN}_{timestamp}.mp4")
+                new_video_path = os.path.join(
+                    self.record_path, f"{DEVICE_SN}_{timestamp}.mp4"
+                )
                 try:
                     if os.path.exists(new_video_path):
                         os.remove(new_video_path)
@@ -165,24 +199,28 @@ class RtspRecordingService:
         if self.loop.is_running():
             self.loop.quit()
 
+
 def signal_handler(sig, frame, service):
     service.stop()
     sys.exit(0)
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', default='/dev/video0')
-    parser.add_argument('--port', type=int, default=8554)
-    parser.add_argument('--mount', default='/test')
-    parser.add_argument('--encoder', default='mpph265enc')
-    parser.add_argument('--encoder-options', default='bps=51200000 rc-mode=vbr')
-    parser.add_argument('--payload', default='rtph265pay')
-    parser.add_argument('--pt', type=int, default=97)
-    parser.add_argument('--record-path', default='/home/radxa/Videos')
-    parser.add_argument('--frame-path', default='/home/radxa/Frames')
+    parser.add_argument("--device", default="/dev/video0")
+    parser.add_argument("--port", type=int, default=8554)
+    parser.add_argument("--mount", default="/test")
+    parser.add_argument("--encoder", default="mpph265enc")
+    parser.add_argument("--encoder-options", default="bps=51200000 rc-mode=vbr")
+    parser.add_argument("--payload", default="rtph265pay")
+    parser.add_argument("--pt", type=int, default=97)
+    parser.add_argument("--record-path", default="/home/radxa/Videos")
+    parser.add_argument("--frame-path", default="/home/radxa/Frames")
     return parser.parse_args()
 
+
 def main():
+    # sn_register 함수 추가 예정
     args = parse_args()
     service = RtspRecordingService(
         device=args.device,
@@ -193,11 +231,12 @@ def main():
         payload=args.payload,
         pt=args.pt,
         record_path=args.record_path,
-        frame_path=args.frame_path
+        frame_path=args.frame_path,
     )
     signal.signal(signal.SIGINT, lambda s, f: signal_handler(s, f, service))
     signal.signal(signal.SIGTERM, lambda s, f: signal_handler(s, f, service))
     service.run()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -1,3 +1,5 @@
+# s3_upload.py
+
 import os
 import time
 import cv2
@@ -17,6 +19,7 @@ API_BASE_URL = "https://api.saffir.co.kr"
 upload_executor = ThreadPoolExecutor(max_workers=2)
 extract_executor = ProcessPoolExecutor(max_workers=2)
 
+
 def load_sn():
     try:
         if os.path.exists("sn.txt"):
@@ -30,6 +33,7 @@ def load_sn():
     except:
         return "UNKNOWN"
 
+
 def get_presigned_opencv_url(sn, filename):
     try:
         url = f"{API_BASE_URL}/s3/opencv/upload-url"
@@ -40,6 +44,7 @@ def get_presigned_opencv_url(sn, filename):
     except:
         return None
 
+
 def get_presigned_video_url(sn, filename):
     try:
         url = f"{API_BASE_URL}/s3/stream/upload-url"
@@ -49,6 +54,7 @@ def get_presigned_video_url(sn, filename):
         return res.json().get("upload_url")
     except:
         return None
+
 
 def upload_and_remove_image(image_path):
     try:
@@ -64,7 +70,9 @@ def upload_and_remove_image(image_path):
                 os.remove(image_path)
             return
         with open(image_path, "rb") as f:
-            res = requests.put(presigned_url, data=f, headers={"Content-Type": "image/jpeg"})
+            res = requests.put(
+                presigned_url, data=f, headers={"Content-Type": "image/jpeg"}
+            )
             if res.status_code != 200:
                 return
     except:
@@ -75,6 +83,7 @@ def upload_and_remove_image(image_path):
                 os.remove(image_path)
             except:
                 pass
+
 
 def upload_video_to_s3(video_path):
     try:
@@ -89,11 +98,14 @@ def upload_video_to_s3(video_path):
         if not presigned_url:
             return
         with open(video_path, "rb") as f:
-            res = requests.put(presigned_url, data=f, headers={"Content-Type": "video/mp4"})
+            res = requests.put(
+                presigned_url, data=f, headers={"Content-Type": "video/mp4"}
+            )
             if res.status_code == 200:
                 os.remove(video_path)
     except:
         pass
+
 
 def process_frames_for_video(video_filename):
     try:
@@ -107,7 +119,7 @@ def process_frames_for_video(video_filename):
         for filename in os.listdir(FRAME_PATH):
             if filename.startswith(f"{sn}_") and filename.endswith(".jpg"):
                 try:
-                    frame_time_str = filename.split('_', 1)[1].split('.')[0]
+                    frame_time_str = filename.split("_", 1)[1].split(".")[0]
                     frame_time = datetime.strptime(frame_time_str, "%Y%m%d_%H%M%S")
                     if base_time <= frame_time < base_time + timedelta(seconds=60):
                         all_frames.append((filename, frame_time))
@@ -154,6 +166,7 @@ def process_frames_for_video(video_filename):
     except:
         pass
 
+
 class VideoHandler(FileSystemEventHandler):
     def __init__(self):
         self.processed_files = set()
@@ -177,11 +190,15 @@ class VideoHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".mp4"):
             video_file = os.path.basename(event.src_path)
-            if not video_file.startswith("temp_") and video_file not in self.processed_files:
+            if (
+                not video_file.startswith("temp_")
+                and video_file not in self.processed_files
+            ):
                 self.processed_files.add(video_file)
                 time.sleep(1)
                 upload_executor.submit(upload_video_to_s3, event.src_path)
                 upload_executor.submit(process_frames_for_video, video_file)
+
 
 if __name__ == "__main__":
     observer = Observer()
