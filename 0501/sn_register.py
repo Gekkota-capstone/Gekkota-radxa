@@ -1,5 +1,3 @@
-# sn_register.py
-
 import socket
 import requests
 import json
@@ -17,8 +15,7 @@ def get_local_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception as e:
-        print(f"❌ IP 조회 실패: {e}")
+    except:
         return None
 
 def register_device(ip):
@@ -27,8 +24,7 @@ def register_device(ip):
         response = requests.get(url, params={"ip": ip}, timeout=10)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"❌ 등록 요청 실패: {e}")
+    except:
         return None
 
 def update_device(sn, ip):
@@ -43,8 +39,7 @@ def update_device(sn, ip):
         response = requests.put(url, data=json.dumps(payload), headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"❌ 업데이트 요청 실패: {e}")
+    except:
         return None
 
 def save_sn(sn):
@@ -52,8 +47,7 @@ def save_sn(sn):
         with open(SN_FILE, "w") as f:
             f.write(sn)
         return True
-    except Exception as e:
-        print(f"❌ SN 저장 실패: {e}")
+    except:
         return False
 
 def load_sn():
@@ -66,27 +60,15 @@ def main():
     ip = get_local_ip()
     if not ip:
         return
-
     sn = load_sn()
-
     if sn:
-        print(f"📦 SN 파일 확인됨: {sn} → 업데이트 요청")
-        result = update_device(sn, ip)
-        if result:
-            print("✅ 업데이트 성공:", json.dumps(result, indent=2, ensure_ascii=False))
+        update_device(sn, ip)
     else:
-        print("🆕 SN 없음 → 신규 등록 요청")
         result = register_device(ip)
         if result:
-            print("✅ 등록 성공:", json.dumps(result, indent=2, ensure_ascii=False))
             new_sn = result.get("serial_number")
             if new_sn:
-                if save_sn(new_sn):
-                    print(f"📄 SN 저장 완료: {new_sn}")
-                else:
-                    print("❌ SN 저장 실패")
-            else:
-                print("❌ 응답에 serial_number 없음")
+                save_sn(new_sn)
 
 if __name__ == "__main__":
     main()

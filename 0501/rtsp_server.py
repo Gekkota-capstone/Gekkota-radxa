@@ -6,6 +6,7 @@ import signal
 import logging
 import os
 import shutil
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -13,10 +14,8 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 
-# 로그 끄기
 logging.disable(logging.CRITICAL)
 
-# ✅ SN 불러오기
 def load_sn():
     try:
         sn_path = Path("/home/radxa/sn.txt")
@@ -28,21 +27,24 @@ def load_sn():
 
 DEVICE_SN = load_sn()
 
-# ✅ 타임스탬프 생성
 def get_previous_minute_timestamp():
     kst = timezone(timedelta(hours=9))
     started = datetime.now(tz=kst) - timedelta(minutes=1)
+    started = started.replace(second=0, microsecond=0)
     return started.strftime("%Y%m%d_%H%M%S")
 
-# ✅ 프레임 리네이밍 함수
 def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Frames"):
     base_time = datetime.strptime(video_timestamp, "%Y%m%d_%H%M%S")
-
-    # multifilesink에서 쌓인 최신 이미지 60개만 처리
-    frame_files = sorted(
-        [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
-        key=lambda x: os.path.getmtime(os.path.join(frame_dir, x))
-    )[-60:]  # 마지막 60개만
+    try:
+        frame_files = sorted(
+            [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
+            key=lambda x: int(x.split('_')[1].split('.')[0])
+        )[-60:]
+    except:
+        frame_files = sorted(
+            [f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".jpg")],
+            key=lambda x: os.path.getmtime(os.path.join(frame_dir, x))
+        )[-60:]
 
     for i, filename in enumerate(frame_files):
         old_path = os.path.join(frame_dir, filename)
@@ -50,11 +52,18 @@ def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Fram
         new_name = f"{sn}_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
         new_path = os.path.join(frame_dir, new_name)
         try:
+            if os.path.exists(new_path):
+                os.remove(new_path)
             shutil.move(old_path, new_path)
-        except Exception as e:
-            print(f"❌ Rename 실패: {old_path} → {new_path} - {e}")
+        except:
+            pass
 
-# ✅ RTSP Factory
+def wait_until_next_minute():
+    now = datetime.utcnow()
+    next_min = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    wait_sec = (next_min - now).total_seconds()
+    time.sleep(wait_sec)
+
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
                  payload="rtph265pay", pt=97):
@@ -63,7 +72,6 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
         self.encoder_options = encoder_options
         self.payload = payload
         self.pt = pt
-
         self.launch_string = (
             "intervideosrc channel=cam ! queue leaky=downstream max-size-buffers=5 ! "
             "{0} {1} ! {2} name=pay0 pt={3}"
@@ -72,7 +80,6 @@ class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
 
-# ✅ RTSP 서비스
 class RtspRecordingService:
     def __init__(self, device='/dev/video0', port=8554, mount='/test',
                  encoder='mpph265enc', encoder_options="bps=51200000 rc-mode=vbr",
@@ -89,7 +96,6 @@ class RtspRecordingService:
         self.frame_path = frame_path
 
         Gst.init(None)
-
         self.server = GstRtspServer.RTSPServer()
         self.server.set_service(self.port)
         self.server.props.backlog = 2
@@ -98,53 +104,47 @@ class RtspRecordingService:
         self.factory.set_shared(True)
         self.server.get_mount_points().add_factory(self.mount, self.factory)
 
-        self.record_pipeline = self._create_record_pipeline()
-        self.loop = GLib.MainLoop()
+        os.makedirs(self.record_path, exist_ok=True)
+        os.makedirs(self.frame_path, exist_ok=True)
 
+        wait_until_next_minute()
+        self.record_pipeline = self._create_record_pipeline()
+
+        self.loop = GLib.MainLoop()
         self.record_pipeline.get_bus().add_signal_watch()
         self.record_pipeline.get_bus().connect("message::element", self._on_element_message)
 
     def _create_record_pipeline(self):
-        os.makedirs(self.record_path, exist_ok=True)
-        os.makedirs(self.frame_path, exist_ok=True)
-
         video_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
         frame_pattern = os.path.join(self.frame_path, "frame_%05d.jpg")
-
         pipeline_str = (
             f"v4l2src device={self.device} ! "
             "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! tee name=t "
-
-            # 영상 저장
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             f"{self.encoder} {self.encoder_options} ! h265parse ! "
             "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "
-
-            # 이미지 저장
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             "videorate ! video/x-raw,framerate=1/1 ! jpegenc ! multifilesink location={} post-messages=true "
-
-            # RTSP 송출
             "t. ! queue leaky=downstream max-size-buffers=5 ! intervideosink channel=cam"
         ).format(video_pattern, frame_pattern)
-
         return Gst.parse_launch(pipeline_str)
 
     def _on_element_message(self, bus, message):
         structure = message.get_structure()
         if not structure:
             return
-
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
             if location and os.path.exists(location):
                 timestamp = get_previous_minute_timestamp()
                 new_video_path = os.path.join(self.record_path, f"{DEVICE_SN}_{timestamp}.mp4")
                 try:
+                    if os.path.exists(new_video_path):
+                        os.remove(new_video_path)
                     os.rename(location, new_video_path)
                     rename_multifilesink_frames(DEVICE_SN, timestamp, self.frame_path)
-                except Exception as e:
-                    print(f"❌ 파일 변경 실패: {e}")
+                except:
+                    pass
 
     def start(self):
         if self.server.attach(None) == 0:
@@ -155,7 +155,7 @@ class RtspRecordingService:
         self.start()
         try:
             self.loop.run()
-        except Exception:
+        except:
             pass
         finally:
             self.stop()
@@ -170,7 +170,7 @@ def signal_handler(sig, frame, service):
     sys.exit(0)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="RTSP Server + Recording + Frame Extractor")
+    parser = argparse.ArgumentParser()
     parser.add_argument('--device', default='/dev/video0')
     parser.add_argument('--port', type=int, default=8554)
     parser.add_argument('--mount', default='/test')
