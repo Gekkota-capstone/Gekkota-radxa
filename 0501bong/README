@@ -1,0 +1,14 @@
+# Make sure both scripts are executable
+sudo chmod +x /home/radxa/rtsp_server.py
+sudo chmod +x /home/radxa/s3_upload.py
+
+sudo nano /home/radxa/boot_services.sh
+
+sudo chmod +x /home/radxa/boot_services.sh
+
+sudo nano /etc/systemd/system/boot_services.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable boot_services.service
+sudo systemctl start boot_services.service
+sudo systemctl status boot_services.service

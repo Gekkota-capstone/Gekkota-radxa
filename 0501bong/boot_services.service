@@ -1,0 +1,13 @@
+[Unit]
+Description=Boot Services
+After=network.target
+
+[Service]
+Type=forking
+User=radxa
+ExecStart=/home/radxa/boot_services.sh
+WorkingDirectory=/home/radxa
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
