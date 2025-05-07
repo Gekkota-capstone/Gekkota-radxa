@@ -1,7 +1,3 @@
-# sn_register and rtsp_server
-
-# rstp_server.py
-
 import gi
 import sys
 import argparse
@@ -89,52 +85,78 @@ def load_sn():
 DEVICE_SN = load_sn()
 
 
-def get_previous_minute_timestamp():
+# 5분 전 타임스탬프 생성 (00초로 설정)
+def get_previous_five_minutes_timestamp():
     kst = timezone(timedelta(hours=9))
-    started = datetime.now(tz=kst) - timedelta(minutes=1)
-    started = started.replace(second=0, microsecond=0)
-    return started.strftime("%Y%m%d_%H%M%S")
+    now = datetime.now(tz=kst)
+    # 현재 시간의 분을 5로 나눈 나머지를 계산
+    remainder = now.minute % 5
+    # 가장 최근 5분 간격 시간을 계산 (현재 시간에서 나머지 분만큼 뺌)
+    prev_five_min = now - timedelta(minutes=remainder, seconds=now.second, microseconds=now.microsecond)
+    
+    # 5분 전 시간 계산
+    prev_five_min = prev_five_min - timedelta(minutes=5)
+    
+    return prev_five_min.strftime("%Y%m%d_%H%M%S")
 
 
-def rename_multifilesink_frames(sn, video_timestamp, frame_dir="/home/radxa/Frames"):
-    base_time = datetime.strptime(video_timestamp, "%Y%m%d_%H%M%S")
-    try:
-        frame_files = sorted(
-            [
-                f
-                for f in os.listdir(frame_dir)
-                if f.startswith("frame_") and f.endswith(".jpg")
-            ],
-            key=lambda x: int(x.split("_")[1].split(".")[0]),
-        )[-60:]
-    except:
-        frame_files = sorted(
-            [
-                f
-                for f in os.listdir(frame_dir)
-                if f.startswith("frame_") and f.endswith(".jpg")
-            ],
-            key=lambda x: os.path.getmtime(os.path.join(frame_dir, x)),
-        )[-60:]
-
-    for i, filename in enumerate(frame_files):
-        old_path = os.path.join(frame_dir, filename)
-        timestamp = base_time + timedelta(seconds=i)
-        new_name = f"{sn}_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
-        new_path = os.path.join(frame_dir, new_name)
-        try:
-            if os.path.exists(new_path):
-                os.remove(new_path)
-            shutil.move(old_path, new_path)
-        except:
-            pass
-
-
-def wait_until_next_minute():
+# 다음 5분 간격까지 대기
+def wait_until_next_five_minutes():
     now = datetime.utcnow()
-    next_min = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    wait_sec = (next_min - now).total_seconds()
+    # 현재 분을 5로 나눈 나머지 계산
+    remainder_minutes = now.minute % 5
+    remainder_seconds = now.second
+    remainder_microseconds = now.microsecond
+    
+    # 다음 5분 간격 계산
+    wait_minutes = 5 - remainder_minutes
+    if remainder_minutes == 0 and (remainder_seconds > 0 or remainder_microseconds > 0):
+        wait_minutes = 5
+    
+    # 다음 5분 간격의 정확한 시간
+    next_five_min = now + timedelta(
+        minutes=wait_minutes, 
+        seconds=-remainder_seconds, 
+        microseconds=-remainder_microseconds
+    )
+    
+    wait_sec = (next_five_min - now).total_seconds()
+    print(f"🕒 다음 5분 간격까지 {wait_sec:.2f}초 대기 중...")
     time.sleep(wait_sec)
+    print("⏰ 대기 완료, 서버 시작")
+
+
+# 현재 시간 기준 타임스탬프 생성 (실시간 프레임용)
+def get_current_timestamp():
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(tz=kst)
+    return now.strftime("%Y%m%d_%H%M%S")
+
+
+# GStreamer 버스 메시지 콜백 함수 (현재 시간 기준 파일명 생성)
+def frame_file_created_callback(bus, message, user_data):
+    if message.type == Gst.MessageType.ELEMENT:
+        structure = message.get_structure()
+        if structure and structure.get_name() == "GstMultiFileSink":
+            filename = structure.get_string("filename")
+            if filename:
+                # 파일 존재 확인
+                if not os.path.exists(filename):
+                    return
+                    
+                # 기존 frame_XXXXX.jpg 파일을 SN_TIMESTAMP.jpg 형식으로 직접 변경
+                timestamp = get_current_timestamp()
+                new_filename = os.path.join(os.path.dirname(filename), f"{DEVICE_SN}_{timestamp}.jpg")
+                
+                try:
+                    # 동일 이름의 파일이 있으면 삭제
+                    if os.path.exists(new_filename):
+                        os.remove(new_filename)
+                    # 파일 이동
+                    shutil.move(filename, new_filename)
+                    print(f"✅ 프레임 생성: {os.path.basename(new_filename)}")
+                except Exception as e:
+                    print(f"❌ 프레임 이름 변경 실패: {filename} -> {new_filename} - {e}")
 
 
 class TeeRtspMediaFactory(GstRtspServer.RTSPMediaFactory):
@@ -195,28 +217,53 @@ class RtspRecordingService:
         os.makedirs(self.record_path, exist_ok=True)
         os.makedirs(self.frame_path, exist_ok=True)
 
-        wait_until_next_minute()
+        # 시작 전 기존 프레임 정리
+        self._cleanup_existing_frames()
+
+        # 다음 5분 간격까지 대기
+        wait_until_next_five_minutes()
+        
+        # 녹화 파이프라인 생성
         self.record_pipeline = self._create_record_pipeline()
 
-        self.loop = GLib.MainLoop()
+        # 프레임 생성 콜백 연결
         self.record_pipeline.get_bus().add_signal_watch()
-        self.record_pipeline.get_bus().connect(
-            "message::element", self._on_element_message
-        )
+        self.record_pipeline.get_bus().connect("message", frame_file_created_callback, None)
+        self.record_pipeline.get_bus().connect("message::element", self._on_element_message)
+
+        self.loop = GLib.MainLoop()
+
+    def _cleanup_existing_frames(self):
+        try:
+            count = 0
+            for filename in os.listdir(self.frame_path):
+                if filename.endswith(".jpg"):
+                    file_path = os.path.join(self.frame_path, filename)
+                    os.remove(file_path)
+                    count += 1
+            if count > 0:
+                print(f"🧹 기존 프레임 {count}개 정리 완료")
+        except Exception as e:
+            print(f"❌ 기존 프레임 정리 실패: {e}")
 
     def _create_record_pipeline(self):
         video_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
-        frame_pattern = os.path.join(self.frame_path, "frame_%05d.jpg")
+        
+        # 프레임 패턴을 timestamp로 직접 저장하지 않고, 
+        # GStreamer에서는 고유한 이름으로 만들고 메시지 핸들러에서 이름 변경
+        frame_pattern = os.path.join(self.frame_path, "%d.jpg")
+        
         pipeline_str = (
             f"v4l2src device={self.device} ! "
             "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! tee name=t "
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             f"{self.encoder} {self.encoder_options} ! h265parse ! "
-            "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "
+            "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=300000000000 "  # 5분 = 300초 = 300,000,000,000 나노초
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             "videorate ! video/x-raw,framerate=1/1 ! jpegenc ! multifilesink location={} post-messages=true "
             "t. ! queue leaky=downstream max-size-buffers=5 ! intervideosink channel=cam"
         ).format(video_pattern, frame_pattern)
+        
         return Gst.parse_launch(pipeline_str)
 
     def _on_element_message(self, bus, message):
@@ -226,7 +273,7 @@ class RtspRecordingService:
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
             if location and os.path.exists(location):
-                timestamp = get_previous_minute_timestamp()
+                timestamp = get_previous_five_minutes_timestamp()
                 new_video_path = os.path.join(
                     self.record_path, f"{DEVICE_SN}_{timestamp}.mp4"
                 )
@@ -234,21 +281,24 @@ class RtspRecordingService:
                     if os.path.exists(new_video_path):
                         os.remove(new_video_path)
                     os.rename(location, new_video_path)
-                    rename_multifilesink_frames(DEVICE_SN, timestamp, self.frame_path)
-                except:
-                    pass
+                    print(f"✅ 비디오 리네이밍: {location} → {new_video_path}")
+                except Exception as e:
+                    print(f"❌ 파일 변경 실패: {e}")
 
     def start(self):
         if self.server.attach(None) == 0:
+            print("❌ RTSP 서버 연결 실패")
             sys.exit(1)
+        print("✅ RTSP 서버 연결 성공")
         self.record_pipeline.set_state(Gst.State.PLAYING)
+        print("✅ 녹화 파이프라인 시작")
 
     def run(self):
         self.start()
         try:
             self.loop.run()
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ 메인 루프 오류: {e}")
         finally:
             self.stop()
 
@@ -256,9 +306,11 @@ class RtspRecordingService:
         self.record_pipeline.set_state(Gst.State.NULL)
         if self.loop.is_running():
             self.loop.quit()
+        print("✅ 서비스 정상 종료")
 
 
 def signal_handler(sig, frame, service):
+    print("👋 종료 신호 받음")
     service.stop()
     sys.exit(0)
 
@@ -282,27 +334,36 @@ def main():
 
     ip = get_local_ip()
     if not ip:
+        print("❌ 로컬 IP 주소 확인 실패")
         sys.exit(1)
+    print(f"✅ 로컬 IP 주소: {ip}")
 
     sn = load_sn()
     if sn and sn != "UNKNOWN":
+        print(f"✅ 기존 SN 확인: {sn}")
         update_device(sn, ip)
         DEVICE_SN = sn
     else:
+        print("ℹ️ SN 없음, 새로 등록 시도")
         result = register_device(ip)
         if result:
             new_sn = result.get("serial_number")
             if new_sn:
                 save_sn(new_sn)
                 DEVICE_SN = new_sn
+                print(f"✅ 새 SN 등록 완료: {new_sn}")
             else:
+                print("❌ SN 응답 없음")
                 sys.exit(1)
         else:
+            print("❌ 디바이스 등록 실패")
             sys.exit(1)
 
     if DEVICE_SN == "UNKNOWN":
+        print("❌ 유효한 SN 없음")
         sys.exit(1)
 
+    print(f"🚀 RTSP 서버 시작 (SN: {DEVICE_SN})")
     args = parse_args()
     service = RtspRecordingService(
         device=args.device,
