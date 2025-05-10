@@ -5,13 +5,14 @@ import shutil
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 RECORD_PATH = "/home/radxa/Videos"
 FRAME_PATH = "/home/radxa/Frames"
 API_BASE_URL = "https://api.saffir.co.kr"
 
-# 이미지 업로드용 스레드 풀
-upload_executor = ThreadPoolExecutor(max_workers=5)
+# 이미지와 영상 업로드용 스레드 풀 각각 생성
+image_upload_executor = ThreadPoolExecutor(max_workers=2)
 
 # 이미 처리한 파일을 추적하기 위한 세트
 processed_files = set()
@@ -61,12 +62,11 @@ def get_presigned_video_url(sn, filename):
         return None
 
 
-# 이미지 업로드 함수
 def upload_and_remove_image(image_path):
     if not os.path.exists(image_path):
         print(f"❌ 이미지 파일 없음: {image_path}")
         return
-        
+
     try:
         image_name = os.path.basename(image_path)
         sn = load_sn()
@@ -75,14 +75,14 @@ def upload_and_remove_image(image_path):
             if os.path.exists(image_path):
                 os.remove(image_path)
             return
-        
+
         presigned_url = get_presigned_opencv_url(sn, image_name)
         if not presigned_url:
             print(f"❌ URL 발급 실패, 이미지 삭제: {image_name}")
             if os.path.exists(image_path):
                 os.remove(image_path)
             return
-        
+
         with open(image_path, "rb") as f:
             print(f"📤 이미지 업로드 시작: {image_name}")
             res = requests.put(
@@ -95,7 +95,6 @@ def upload_and_remove_image(image_path):
     except Exception as e:
         print(f"❌ 이미지 업로드 오류: {image_path} - {e}")
     finally:
-        # 항상 로컬 파일 삭제
         if os.path.exists(image_path):
             try:
                 os.remove(image_path)
@@ -108,7 +107,7 @@ def upload_video_to_s3(video_path):
     if not os.path.exists(video_path):
         print(f"❌ 영상 파일 없음: {video_path}")
         return
-        
+
     try:
         video_file = os.path.basename(video_path)
         print(f"📤 영상 업로드 시작: {video_path}")
@@ -116,15 +115,14 @@ def upload_video_to_s3(video_path):
         if not sn:
             print("❌ SN 로드 실패")
             return
-        
-        # 파일이 완전히 쓰여지도록 대기
+
         time.sleep(1)
-        
+
         presigned_url = get_presigned_video_url(sn, video_file)
         if not presigned_url:
             print(f"❌ 영상 URL 발급 실패: {video_file}")
             return
-        
+
         with open(video_path, "rb") as f:
             res = requests.put(
                 presigned_url, data=f, headers={"Content-Type": "video/mp4"}
@@ -139,71 +137,64 @@ def upload_video_to_s3(video_path):
         print(f"❌ 영상 업로드 오류: {video_path} - {e}")
 
 
-# 프레임 폴더 주기적 스캔 및 처리
 def scan_frame_directory():
     try:
         files = [f for f in os.listdir(FRAME_PATH) if f.endswith('.jpg')]
         new_files = [f for f in files if f not in processed_files]
-        
+
         if new_files:
             print(f"🔍 새 프레임 {len(new_files)}개 발견")
-            
+
         for filename in new_files:
-            # 숫자.jpg 형식은 처리하지 않음 (GStreamer 임시 파일)
             if filename.split('.')[0].isdigit():
                 processed_files.add(filename)
                 continue
-                
-            # SFRXC12515GF00001_20250508_003014.jpg 형식 처리
+
             if '_' in filename:
                 parts = filename.split('_')
-                if len(parts) >= 2 and len(parts[0]) > 5:  # SN은 일반적으로 5자 이상
+                if len(parts) >= 2 and len(parts[0]) > 5:
                     file_path = os.path.join(FRAME_PATH, filename)
                     print(f"🖼️ 프레임 업로드 큐에 추가: {filename}")
-                    upload_executor.submit(upload_and_remove_image, file_path)
+                    image_upload_executor.submit(upload_and_remove_image, file_path)
                     processed_files.add(filename)
     except Exception as e:
         print(f"❌ 프레임 폴더 스캔 오류: {e}")
 
 
-# 비디오 폴더 주기적 스캔 및 처리
 def scan_video_directory():
     try:
         files = [f for f in os.listdir(RECORD_PATH) if f.endswith('.mp4') and not f.startswith('temp_')]
         new_files = [f for f in files if f not in processed_videos]
-        
+
         if new_files:
             print(f"🔍 새 영상 {len(new_files)}개 발견")
-            
+
         for filename in new_files:
             file_path = os.path.join(RECORD_PATH, filename)
             print(f"📦 영상 업로드 큐에 추가: {filename}")
-            upload_executor.submit(upload_video_to_s3, file_path)
+            threading.Thread(target=upload_video_to_s3, args=(file_path,), daemon=True).start()
             processed_videos.add(filename)
     except Exception as e:
         print(f"❌ 비디오 폴더 스캔 오류: {e}")
 
 
-# 메인 실행 함수
+
 if __name__ == "__main__":
     print("🚀 S3 업로드 서비스 시작...")
     print(f"📂 영상 경로: {RECORD_PATH}")
     print(f"📂 프레임 경로: {FRAME_PATH}")
-    
+
     try:
-        # 시작 전 폴더 상태 확인
         print("🧹 기존 파일 확인 중...")
         scan_frame_directory()
         scan_video_directory()
-        
+
         print("🔄 주기적 폴더 스캔 시작 (0.5초 간격)")
-        
-        # 주기적으로 폴더 스캔
+
         while True:
             scan_frame_directory()
             scan_video_directory()
-            time.sleep(0.5)  # 0.5초마다 스캔
-            
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("👋 종료 신호 받음")
         print("✅ S3 업로드 서비스 종료")

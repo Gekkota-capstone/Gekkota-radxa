@@ -255,7 +255,8 @@ class RtspRecordingService:
         
         pipeline_str = (
             f"v4l2src device={self.device} ! "
-            "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! tee name=t "
+            "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! " "videoflip method=rotate-180 ! "  
+            "tee name=t "
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             f"{self.encoder} {self.encoder_options} ! h265parse ! "
             "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=300000000000 "  # 5분 = 300초 = 300,000,000,000 나노초
