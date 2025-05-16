@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import time
+import fcntl  # 파일 잠금 추가
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import socket
@@ -22,6 +23,7 @@ API_HOST = "https://api.saffir.co.kr"
 SN_FILE = "/home/radxa/sn.txt"
 RTSP_PORT = 8554
 RTSP_PATH = "stream"
+LOCK_FILE = "/home/radxa/video_processing.lock"  # 파일 처리 동기화를 위한 잠금 파일
 
 
 def get_local_ip():
@@ -85,45 +87,33 @@ def load_sn():
 DEVICE_SN = load_sn()
 
 
-# 5분 전 타임스탬프 생성 (00초로 설정)
-def get_previous_five_minutes_timestamp():
+# 정확한 현재 시간 타임스탬프 생성 (KST 기준)
+def get_exact_current_timestamp():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(tz=kst)
-    # 현재 시간의 분을 5로 나눈 나머지를 계산
-    remainder = now.minute % 5
-    # 가장 최근 5분 간격 시간을 계산 (현재 시간에서 나머지 분만큼 뺌)
-    prev_five_min = now - timedelta(minutes=remainder, seconds=now.second, microseconds=now.microsecond)
-    
-    # 5분 전 시간 계산
-    prev_five_min = prev_five_min - timedelta(minutes=5)
-    
-    return prev_five_min.strftime("%Y%m%d_%H%M%S")
+    return now.strftime("%Y%m%d_%H%M%S")
 
 
-# 다음 5분 간격까지 대기
-def wait_until_next_five_minutes():
-    now = datetime.utcnow()
-    # 현재 분을 5로 나눈 나머지 계산
-    remainder_minutes = now.minute % 5
-    remainder_seconds = now.second
-    remainder_microseconds = now.microsecond
+# 다음 1분 간격까지 대기 (정확한 시간 동기화)
+def wait_until_next_one_minute():
+    now = datetime.now(timezone(timedelta(hours=9)))  # KST 기준 현재 시간
+    # 다음 분의 시작 시간 계산 (00초)
+    next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
     
-    # 다음 5분 간격 계산
-    wait_minutes = 5 - remainder_minutes
-    if remainder_minutes == 0 and (remainder_seconds > 0 or remainder_microseconds > 0):
-        wait_minutes = 5
+    # 다음 분까지 대기
+    wait_sec = (next_minute - now).total_seconds()
+    print(f"🕒 다음 1분 간격까지 {wait_sec:.2f}초 대기 중...")
     
-    # 다음 5분 간격의 정확한 시간
-    next_five_min = now + timedelta(
-        minutes=wait_minutes, 
-        seconds=-remainder_seconds, 
-        microseconds=-remainder_microseconds
-    )
+    # 정확한 타이밍을 위해 sleep 분할
+    if wait_sec > 0.5:
+        time.sleep(wait_sec - 0.5)
+        # 마이크로초 단위 정밀 대기
+        remaining = (next_minute - datetime.now(timezone(timedelta(hours=9)))).total_seconds()
+        if remaining > 0:
+            time.sleep(remaining)
     
-    wait_sec = (next_five_min - now).total_seconds()
-    print(f"🕒 다음 5분 간격까지 {wait_sec:.2f}초 대기 중...")
-    time.sleep(wait_sec)
     print("⏰ 대기 완료, 서버 시작")
+    return get_exact_current_timestamp()
 
 
 # 현재 시간 기준 타임스탬프 생성 (실시간 프레임용)
@@ -131,6 +121,19 @@ def get_current_timestamp():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(tz=kst)
     return now.strftime("%Y%m%d_%H%M%S")
+
+
+# 파일 잠금을 통한 동기화 헬퍼 함수
+def with_file_lock(func):
+    def wrapper(*args, **kwargs):
+        lock_file = open(LOCK_FILE, 'w+')
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            return func(*args, **kwargs)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+    return wrapper
 
 
 # GStreamer 버스 메시지 콜백 함수 (현재 시간 기준 파일명 생성)
@@ -204,6 +207,9 @@ class RtspRecordingService:
         self.pt = pt
         self.record_path = record_path
         self.frame_path = frame_path
+        
+        # 업로드 관련 정보를 저장할 파일
+        self.upload_info_file = os.path.join(record_path, ".upload_tracker")
 
         Gst.init(None)
         self.server = GstRtspServer.RTSPServer()
@@ -216,12 +222,17 @@ class RtspRecordingService:
 
         os.makedirs(self.record_path, exist_ok=True)
         os.makedirs(self.frame_path, exist_ok=True)
+        
+        # 잠금 파일 초기화
+        with open(LOCK_FILE, 'w+') as f:
+            pass
 
         # 시작 전 기존 프레임 정리
         self._cleanup_existing_frames()
+        self._cleanup_temporary_videos()
 
-        # 다음 5분 간격까지 대기
-        wait_until_next_five_minutes()
+        # 다음 1분 간격까지 대기
+        wait_until_next_one_minute()
         
         # 녹화 파이프라인 생성
         self.record_pipeline = self._create_record_pipeline()
@@ -245,6 +256,20 @@ class RtspRecordingService:
                 print(f"🧹 기존 프레임 {count}개 정리 완료")
         except Exception as e:
             print(f"❌ 기존 프레임 정리 실패: {e}")
+    
+    def _cleanup_temporary_videos(self):
+        """임시 비디오 파일 정리"""
+        try:
+            count = 0
+            for filename in os.listdir(self.record_path):
+                if filename.startswith("temp_") and filename.endswith(".mp4"):
+                    file_path = os.path.join(self.record_path, filename)
+                    os.remove(file_path)
+                    count += 1
+            if count > 0:
+                print(f"🧹 임시 비디오 파일 {count}개 정리 완료")
+        except Exception as e:
+            print(f"❌ 임시 비디오 정리 실패: {e}")
 
     def _create_record_pipeline(self):
         video_pattern = os.path.join(self.record_path, "temp_%05d.mp4")
@@ -255,18 +280,20 @@ class RtspRecordingService:
         
         pipeline_str = (
             f"v4l2src device={self.device} ! "
-            "videorate ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! " "videoflip method=rotate-180 ! "  
+            "videorate ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! " "videoflip method=rotate-180 ! "  
             "tee name=t "
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             f"{self.encoder} {self.encoder_options} ! h265parse ! "
-            "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=300000000000 "  # 5분 = 300초 = 300,000,000,000 나노초
+            "splitmuxsink name=smux muxer=mp4mux async-finalize=true location={} max-size-time=60000000000 "  # 1분 = 60초 = 60,000,000,000 나노초
             "t. ! queue leaky=downstream max-size-buffers=5 ! "
             "videorate ! video/x-raw,framerate=1/1 ! jpegenc ! multifilesink location={} post-messages=true "
             "t. ! queue leaky=downstream max-size-buffers=5 ! intervideosink channel=cam"
         ).format(video_pattern, frame_pattern)
         
+        print(f"🔧 파이프라인 생성: {pipeline_str}")
         return Gst.parse_launch(pipeline_str)
 
+    @with_file_lock
     def _on_element_message(self, bus, message):
         structure = message.get_structure()
         if not structure:
@@ -274,14 +301,35 @@ class RtspRecordingService:
         if structure.get_name() == "splitmuxsink-fragment-closed":
             location = structure.get_string("location")
             if location and os.path.exists(location):
-                timestamp = get_previous_five_minutes_timestamp()
-                new_video_path = os.path.join(
-                    self.record_path, f"{DEVICE_SN}_{timestamp}.mp4"
-                )
                 try:
+                    # 현재 정확한 KST 시간 확인
+                    now = datetime.now(timezone(timedelta(hours=9)))
+                    # 정확한 리네이밍을 위해 1분 전 시간 기준으로 타임스탬프 설정
+                    adjusted_time = now - timedelta(minutes=1)
+                    aligned_time = adjusted_time.replace(second=0, microsecond=0)
+                    timestamp = aligned_time.strftime("%Y%m%d_%H%M%S")
+
+                    print(f"🕒 현재 시간: {now.strftime('%H:%M:%S.%f')}, 리네이밍 기준 타임스탬프: {timestamp}")
+
+                    new_video_path = os.path.join(
+                        self.record_path, f"{DEVICE_SN}_{timestamp}.mp4"
+                    )
+
+                    # 파일 이름 변경 전 완전히 쓰여졌는지 확인
+                    file_size = os.path.getsize(location)
+                    if file_size == 0:
+                        print(f"⚠️ 빈 파일 감지: {location}, 건너뜀")
+                        os.remove(location)
+                        return
+
                     if os.path.exists(new_video_path):
                         os.remove(new_video_path)
+                        print(f"⚠️ 기존 파일 삭제: {new_video_path}")
+
                     os.rename(location, new_video_path)
+                    with open(self.upload_info_file, "a") as f:
+                        f.write(f"{new_video_path}|{timestamp}|{int(time.time())}\n")
+
                     print(f"✅ 비디오 리네이밍: {location} → {new_video_path}")
                 except Exception as e:
                     print(f"❌ 파일 변경 실패: {e}")
